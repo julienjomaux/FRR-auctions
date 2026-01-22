@@ -7,7 +7,7 @@ from datetime import date
 
 st.title("AFRR Data Visualizer")
 
-# User selects delivery date
+# === Delivery date selector ===
 selected_date = st.date_input(
     "Delivery date",
     value=date.today(),
@@ -15,7 +15,6 @@ selected_date = st.date_input(
     max_value=date.today(),
     format="YYYY-MM-DD"
 )
-
 date_str = selected_date.strftime("%Y-%m-%d")
 
 @st.cache_data(show_spinner=False)
@@ -35,28 +34,99 @@ except Exception as e:
     st.error(f"Error fetching data: {e}")
     st.stop()
 
-# --- Select offered down volume for period 0-24 ---
+# Period definitions
+periods = ['0 - 4', '4 - 8', '8 - 12', '12 - 16', '16 - 20', '20 - 24']
+directions = ['afrrofferedvolumeupmw', 'afrrofferedvolumedownmw']
+
+# ----------- Auction results summary block ------------
+st.markdown("### Auction Results")
+
+# --- All-CCTU (0-24) selected bids
 df_0_24 = df[df['capacitybiddeliveryperiod'].astype(str) == '0 - 24'].copy()
+sel_mask_cctu = df_0_24.get('selectedbyoptimizer', pd.Series("false")).astype(str).str.lower() == "true"
+selected_cctu = df_0_24[sel_mask_cctu]
+
+if not selected_cctu.empty:
+    st.markdown("**All-CCTU (0-24), selected bids:**")
+    st.dataframe(
+        selected_cctu[[
+            'balancingserviceprovidercode',
+            'afrrofferedvolumeupmw',
+            'afrrofferedvolumedownmw',
+            'priceupmwh',
+            'pricedownmwh'
+        ]].rename(columns={
+            'balancingserviceprovidercode': 'Provider',
+            'afrrofferedvolumeupmw': 'Up Volume (MW)',
+            'afrrofferedvolumedownmw': 'Down Volume (MW)',
+            'priceupmwh': 'Up Price (€/MWh)',
+            'pricedownmwh': 'Down Price (€/MWh)'
+        }),
+        hide_index=True
+    )
+else:
+    st.info("No bids were selected for All-CCTU (period 0 to 24).")
+
+# --- Selected period statistics for other periods
+results_rows = []
+for per in periods:
+    for direction in ['up', 'down']:
+        field = f'afrrofferedvolume{direction}mw'
+        price = 'priceupmwh' if direction == 'up' else 'pricedownmwh'
+        sel_mask = df['capacitybiddeliveryperiod'].astype(str) == per
+        subdf = df[sel_mask].copy()
+        subdf[field] = pd.to_numeric(subdf[field], errors='coerce')
+        subdf[price] = pd.to_numeric(subdf[price], errors='coerce')
+        # Submitted
+        total_submitted_vol = subdf[field].sum()
+        # Selected
+        sel_opt_mask = subdf.get('selectedbyoptimizer', pd.Series("false")).astype(str).str.lower() == "true"
+        sel_bids = subdf[sel_opt_mask]
+        total_selected_vol = sel_bids[field].sum()
+        avg_price = np.nan
+        if total_selected_vol > 0:
+            avg_price = (sel_bids[field] * sel_bids[price]).sum() / total_selected_vol
+        marginal_price = sel_bids[price].max(skipna=True)
+        results_rows.append({
+            'Period': per,
+            'Direction': direction,
+            'Total submitted (MW)': total_submitted_vol,
+            'Total selected (MW)': total_selected_vol,
+            'Avg selected price (€/MWh)': avg_price,
+            'Marginal price (€/MWh)': marginal_price
+        })
+if results_rows:
+    st.dataframe(
+        pd.DataFrame(results_rows),
+        hide_index=True
+    )
+else:
+    st.info("No statistics could be calculated for the periods.")
+
+# ==== All-CCTU up visualizer ====
+st.markdown("## All-CCTU up visualizer")
+
+# --- Offered down volume selectbox, after the title
 unique_down_volumes = df_0_24['afrrofferedvolumedownmw'].dropna().unique()
 unique_down_volumes = np.sort(unique_down_volumes.astype(float))
 if len(unique_down_volumes) == 0:
     st.warning("No offered down volumes for '0 - 24' period.")
     st.stop()
-down_volume = st.selectbox("Select a value for offered down volume (MW) (all-CCTU):", unique_down_volumes, index=0)
 
-# Option to set maximum price Y-axis for main chart
+down_volume = st.selectbox("Select a value for offered down volume (MW):", unique_down_volumes, index=0)
+
+# --- Y-axis max below this element
 max_price_main = st.number_input(
-    "Set maximum for price Y-axis for all-CCTU chart (blank for auto):",
+    "Set maximum for price Y-axis for all-CCTU chart (0 for auto):",
     min_value=0.0, value=0.0, step=1.0, format="%.2f", help="Set Y-axis max for main graph. Zero for auto."
 )
 
-# --- Main Scatter Plot: All-CCTU up visualizer ---
-st.markdown("## All-CCTU up visualizer")
+# -------- Graph 1: All-CCTU up visualizer ---------
 main_mask = (df_0_24['afrrofferedvolumedownmw'].astype(float) == down_volume)
 plot_df = df_0_24[main_mask].copy()
 
 if plot_df.empty:
-    st.info("No data to plot: no records for '0 - 24' with offered volume down = {}".format(down_volume))
+    st.info("No data to plot for '0 - 24' at offered down volume = {}".format(down_volume))
 else:
     x_main = plot_df.get('afrrofferedvolumeupmw', pd.Series(dtype=float)).astype(float)
     y_main = plot_df.get('priceupmwh', pd.Series(dtype=float)).astype(float)
@@ -71,7 +141,7 @@ else:
     ax1.scatter(x_sel, y_sel, color='red', edgecolor='black', label='Selected by Optimizer', s=50)
     ax1.set_xlabel('AFRR Offered Volume Up (MW)')
     ax1.set_ylabel('Price Up (€/MWh)')
-    ax1.set_title(f"AFRR Offered Volume Up vs Price Up\nPeriod: 0 - 24, Offered Volume Down = {down_volume}")
+    ax1.set_title(f"AFRR Offered Volume Up vs Price Up\nPeriod: 0 - 24 | Offered Down = {down_volume} MW")
     ax1.legend()
     ax1.grid(True)
     if max_price_main > 0:
@@ -79,15 +149,12 @@ else:
     plt.tight_layout()
     st.pyplot(fig1)
 
-# Option to set maximum price Y-axis for single CCTU chart
+# ==== Single CCTU aFRR up ====
+st.markdown("## Single CCTU aFRR up")
 max_price_single = st.number_input(
-    "Set maximum for price Y-axis for single CCTU chart (blank for auto):",
+    "Set maximum for price Y-axis for single CCTU chart (0 for auto):",
     min_value=0.0, value=0.0, step=1.0, format="%.2f", help="Set Y-axis max for single CCTU graph. Zero for auto."
 )
-
-st.markdown("## Single CCTU aFRR up")
-
-periods = ['0 - 4', '4 - 8', '8 - 12', '12 - 16', '16 - 20', '20 - 24']
 
 subplot_data = []
 xmax, ymax, xmin, ymin = 0, 0, 0, 0
