@@ -10,8 +10,8 @@ import requests
 import streamlit as st
 
 # ----------------------------- Page Config -----------------------------
-st.set_page_config(page_title="AFRR Bids Explorer", layout="wide")
-st.title("AFRR Auction Results Explorer")
+st.set_page_config(page_title="Belgian FRR capacity", layout="wide")
+st.title("Belgian FRR capacity")
 
 # ----------------------------- Constants ------------------------------
 PERIODS_4H = ['0 - 4', '4 - 8', '8 - 12', '12 - 16', '16 - 20', '20 - 24']  # six 4h periods
@@ -871,3 +871,4 @@ try:
     )
 except Exception:
     pass
+
