@@ -1,11 +1,13 @@
 
-import streamlit as st
-import pandas as pd
-import requests
-import matplotlib.pyplot as plt
+# app.py
 import time
 from io import BytesIO
 from collections import OrderedDict
+
+import matplotlib.pyplot as plt
+import pandas as pd
+import requests
+import streamlit as st
 
 # ----------------------------- Page Config -----------------------------
 st.set_page_config(page_title="AFRR Bids Explorer", layout="wide")
@@ -28,7 +30,7 @@ def ensure_cols(df, cols):
             df[c] = 0
     return df
 
-def coerce_selected(s):
+def coerce_selected(s: pd.Series) -> pd.Series:
     """Coerce selectedbyoptimizer to boolean robustly."""
     return s.map(lambda x: str(x).strip().lower() in ("true", "1", "yes"))
 
@@ -71,9 +73,11 @@ def fetch(dataset: str, d: str, rows_per_page: int = 10000, max_pages: int = 20,
                 js = r.json()
                 recs = js.get("records", [])
                 all_records.extend([rec.get('fields', {}) for rec in recs])
+
                 # pagination: stop if fewer than requested rows
                 if len(recs) < rows_per_page:
                     return pd.DataFrame(all_records)
+
                 start += rows_per_page
                 break  # next page
             except Exception as e:
@@ -152,26 +156,27 @@ def build_summary_and_costs(df: pd.DataFrame, allcctu_sel: pd.DataFrame):
     # Selected-only subset for averages/marginals
     sel = d4[d4['selectedbyoptimizer']].copy()
 
-    # Total awarded and weighted average price per direction
-    # UP
+    # UP aggregates
     grp_up = sel.groupby('capacitybiddeliveryperiod').agg(
         tot_awarded=('afrrawardedvolumeupmw', 'sum'),
         w_price_sum=('priceupmwh', lambda s: (s * sel.loc[s.index, 'afrrawardedvolumeupmw']).sum()),
         marginal=('priceupmwh', 'max')
     )
-    # Avoid division by zero
-    grp_up['avg_price'] = grp_up.apply(lambda r: r['w_price_sum'] / r['tot_awarded'] if r['tot_awarded'] > 0 else 0.0, axis=1)
+    grp_up['avg_price'] = grp_up.apply(
+        lambda r: r['w_price_sum'] / r['tot_awarded'] if r['tot_awarded'] > 0 else 0.0, axis=1
+    )
 
-    # DOWN
+    # DOWN aggregates
     grp_dn = sel.groupby('capacitybiddeliveryperiod').agg(
         tot_awarded=('afrrawardedvolumedownmw', 'sum'),
         w_price_sum=('pricedownmwh', lambda s: (s * sel.loc[s.index, 'afrrawardedvolumedownmw']).sum()),
         marginal=('pricedownmwh', 'max')
     )
-    grp_dn['avg_price'] = grp_dn.apply(lambda r: r['w_price_sum'] / r['tot_awarded'] if r['tot_awarded'] > 0 else 0.0, axis=1)
+    grp_dn['avg_price'] = grp_dn.apply(
+        lambda r: r['w_price_sum'] / r['tot_awarded'] if r['tot_awarded'] > 0 else 0.0, axis=1
+    )
 
     # Build tidy summary
-    # UP rows
     sum_up = pd.DataFrame({
         "Period": grp_up.index.astype(str),
         "Direction": "UP",
@@ -181,7 +186,6 @@ def build_summary_and_costs(df: pd.DataFrame, allcctu_sel: pd.DataFrame):
         "Total Submitted Volume (MW)": agg_submitted['tot_off_up'].reindex(grp_up.index).fillna(0.0).round(2)
     })
 
-    # DOWN rows
     sum_dn = pd.DataFrame({
         "Period": grp_dn.index.astype(str),
         "Direction": "DOWN",
@@ -192,7 +196,6 @@ def build_summary_and_costs(df: pd.DataFrame, allcctu_sel: pd.DataFrame):
     })
 
     summary = pd.concat([sum_up, sum_dn], ignore_index=True)
-    # Ensure all periods exist (even if zero)
     summary['Period'] = pd.Categorical(summary['Period'], categories=PERIODS, ordered=True)
     summary = summary.sort_values(['Direction', 'Period'])
 
@@ -226,7 +229,7 @@ with st.sidebar:
         "Bar charts metric",
         ["Average Price (€/MWh)", "Marginal Price (€/MWh)", "Total Awarded Volume (MW)", "Total Submitted Volume (MW)"],
         index=0,
-        key="metric_select"
+        key=f"metric_select_{date}"  # date-scoped key to avoid session state conflicts
     )
 
     st.markdown("**Merit Order Options**")
@@ -237,14 +240,12 @@ with st.sidebar:
     opt_sync_x_limits = st.checkbox("Sync X (volume) limits UP & DOWN", value=True, key="opt_sync_x_limits")
     opt_grid = st.checkbox("Show grid on charts", value=True, key="opt_grid")
 
-# Reset session-controlled inputs when date changes
+# Reset per-date computed defaults when date changes
 if 'last_date' not in st.session_state or st.session_state['last_date'] != str(date):
     st.session_state['last_date'] = str(date)
-    # These values will be initialized after dynamic computation
     st.session_state['ymax_up_input'] = None
     st.session_state['ymax_down_input'] = None
-    # Reset selected metric and dependent widgets
-    st.session_state['metric_select'] = st.session_state.get('metric_select', "Average Price (€/MWh)")
+    # No need to reset metric select—its key is date-scoped now
 
 if not date:
     st.info("Please select a delivery date from the sidebar to begin.")
@@ -329,14 +330,16 @@ with col_main:
     ax_up.set_ylabel(selected_metric)
     ax_up.set_ylim(bottom=0, top=y_top)
     ax_up.tick_params(axis='x', rotation=45)
-    if opt_grid: ax_up.grid(True, axis='y', linestyle='--', alpha=0.5)
+    if opt_grid:
+        ax_up.grid(True, axis='y', linestyle='--', alpha=0.5)
 
     # DOWN bars
     ax_dn.bar(PERIODS, y_dn, color="#F39C12", edgecolor="black")
     ax_dn.set_title(f"DOWN – {selected_metric}")
     ax_dn.set_ylim(bottom=0, top=y_top)
     ax_dn.tick_params(axis='x', rotation=45)
-    if opt_grid: ax_dn.grid(True, axis='y', linestyle='--', alpha=0.5)
+    if opt_grid:
+        ax_dn.grid(True, axis='y', linestyle='--', alpha=0.5)
 
     st.pyplot(fig_bar)
     bar_png = _save_fig_png(fig_bar)
@@ -375,7 +378,6 @@ with col_main:
                 fig, ax = plt.subplots(figsize=(5.2, 3.2))
                 fig.subplots_adjust(top=0.9)
 
-            # Plot
             if opt_only_selected:
                 ax.scatter(x[sel_mask], y[sel_mask], color='red', edgecolor='black', label='Selected', s=40, zorder=3)
             else:
@@ -386,7 +388,8 @@ with col_main:
             ax.set_xlabel("Offered Volume Up (MW)")
             ax.set_title("Offered Upward Volume vs Price Up", fontsize=12, fontweight='bold')
             ax.tick_params(axis='both', labelsize=8)
-            if opt_grid: ax.grid(True, linestyle='--', alpha=0.4)
+            if opt_grid:
+                ax.grid(True, linestyle='--', alpha=0.4)
 
             y_top_scatter = max(1.0, (float(y.max()) if len(y) else 0.0) * 1.05)
             ax.set_ylim(bottom=0, top=y_top_scatter)
@@ -444,7 +447,7 @@ with col_main:
 
     for i, (cum, prc, cs, ps, cnc, pnc, period_lbl) in enumerate(data_up_plot):
         ax = axs1[i]
-        if opt_show_step and len(cum):
+        if len(cum) and opt_show_step:
             ax.step(cum, prc, where='post', color='gray', linewidth=1, zorder=1)
         if opt_show_points:
             if not opt_only_selected and len(cnc):
@@ -459,9 +462,9 @@ with col_main:
         ax.set_xlabel("")
         xlim_max = max(1.0, xmax_up_all) if opt_sync_x_limits else max(1.0, float(cum.max()) if len(cum) else 1.0)
         ax.set(xlim=(0, xlim_max), ylim=(0, ymax_up_input))
-        if opt_grid: ax.grid(True, linestyle='--', alpha=0.4)
+        if opt_grid:
+            ax.grid(True, linestyle='--', alpha=0.4)
 
-        # Clean legend
         h, l = ax.get_legend_handles_labels()
         if l:
             uniq = OrderedDict(zip(l, h))
@@ -518,7 +521,7 @@ with col_main:
 
     for i, (cum, prc, cs, ps, cnc, pnc, period_lbl) in enumerate(data_down_plot):
         ax = axs2[i]
-        if opt_show_step and len(cum):
+        if len(cum) and opt_show_step:
             ax.step(cum, prc, where='post', color='gray', linewidth=1, zorder=1)
         if opt_show_points:
             if not opt_only_selected and len(cnc):
@@ -533,7 +536,8 @@ with col_main:
         ax.set_xlabel("")
         xlim_max = max(1.0, xmax_down_all) if opt_sync_x_limits else max(1.0, float(cum.max()) if len(cum) else 1.0)
         ax.set(xlim=(0, xlim_max), ylim=(0, ymax_down_input))
-        if opt_grid: ax.grid(True, linestyle='--', alpha=0.4)
+        if opt_grid:
+            ax.grid(True, linestyle='--', alpha=0.4)
 
         h, l = ax.get_legend_handles_labels()
         if l:
