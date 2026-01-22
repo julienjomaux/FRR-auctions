@@ -20,10 +20,10 @@ if date:
         st.warning("No data found for that date.")
         st.stop()
 
-    # --- Use columns for 70% width content ---
-    col1, col2 = st.columns([0.7, 0.3])  # 70% for content, 30% for empty
+    # Use three columns: left-empty, center-content-70%, right-empty
+    col_left, col_main, col_right = st.columns([0.15, 0.7, 0.15])
 
-    with col1:
+    with col_main:
         # --- All-CCTU Table ---
         allcctu = df[df['capacitybiddeliveryperiod'].astype(str) == '0 - 24']
         sel = allcctu[allcctu['selectedbyoptimizer'].astype(str).str.lower() == "true"]
@@ -62,9 +62,17 @@ if date:
         st.markdown("### Period Results Summary")
         st.dataframe(summary, use_container_width=True)
 
-        # --- Scatter Plot ---
-        mask0 = (df['capacitybiddeliveryperiod'].astype(str) == '0 - 24') & (df['afrrofferedvolumedownmw'].astype(float) == 0)
-        p0 = df[mask0]
+        # --- FIRST GRAPH SECTION ---
+        st.markdown("## Scatter Plot: Offered UP vs Upward Price (All-CCTU 0-24)")
+        st.write("This scatter plot displays the offered upward volumes versus their respective upward prices for all bids in the All-CCTU (0-24h) period. You can filter the graph using the 'Offered Volume Down' droplist, which shows only bids with the selected value.")
+
+        # Prepare choices for afrrofferedvolumedownmw
+        vals = allcctu['afrrofferedvolumedownmw'].dropna().unique()
+        vals = sorted(list({float(v) for v in vals}))
+        selected_value = st.selectbox("Select the 'Offered Volume Down' for filtering:", vals, index=0)
+
+        mask0 = (allcctu['afrrofferedvolumedownmw'].astype(float) == selected_value)
+        p0 = allcctu[mask0]
         if not p0.empty:
             x = p0['afrrofferedvolumeupmw'].astype(float)
             y = p0['priceupmwh'].astype(float)
@@ -72,15 +80,19 @@ if date:
             fig, ax = plt.subplots(figsize=(5, 3))
             ax.scatter(x[~sel], y[~sel], color='yellow', edgecolor='black', label='Not selected', s=40)
             ax.scatter(x[sel], y[sel], color='red', edgecolor='black', label='Selected', s=40)
-            ax.set(xlabel='AFRR Offered Volume Up (MW)', ylabel='Price Up (€/MWh)', title="Offered Vol Up vs Price Up")
-            ax.legend()
+            ax.set(xlabel='AFRR Offered Volume Up (MW)', ylabel='Price Up (€/MWh)')
+            ax.set_title("Offered Upward Volume vs Price Up", fontsize=12, fontweight='bold')
+            ax.tick_params(axis='both', labelsize=8)
+            ax.legend(fontsize=8)
             ax.grid(True)
             st.pyplot(fig)
         else:
             st.info("No data to plot for this combination.")
 
-        # --- Merit Order Plots ---
-        st.markdown("### AFRR Up Merit Order by Delivery Period")
+        # --- MERIT ORDER SECTION ---
+        st.markdown("## AFRR Up Merit Order by Delivery Period")
+        st.write("These merit order charts display the cumulative upward offered volumes, sorted by upward price, for each 4-hour delivery period. Selected bids are shown in red, others in yellow.")
+
         xmax = ymax = 0
         xmin = ymin = 1e20
         data = []
@@ -112,11 +124,12 @@ if date:
             if len(cum): ax.step(cum, prc, where='post', color='gray', linewidth=1)
             if len(cnc): ax.scatter(cnc, pnc, color='yellow', edgecolor='black', s=20, label='Not selected')
             if len(cs): ax.scatter(cs, ps, color='red', edgecolor='black', s=20, label='Selected')
-            ax.set_title(f"Period {p}")
+            ax.set_title(f"Period {p}", fontsize=10)
             ax.set(xlabel="Cum. offered volume up (MW)", ylabel="Price up (€/MWh)", xlim=(xmin, xmax), ylim=(ymin, ymax))
             ax.grid(True)
             h, l = ax.get_legend_handles_labels()
             if l: ax.legend(dict(zip(l, h)).values(), dict(zip(l, h)).keys(), fontsize=8)
+            ax.tick_params(axis='both', labelsize=8)
         for j in range(len(periods), len(axs)):
             fig.delaxes(axs[j])
         plt.tight_layout()
