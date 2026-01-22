@@ -346,4 +346,3 @@ if date:
         plt.tight_layout()
         plt.suptitle("AFRR Down Merit Order by Delivery Period", fontsize=14, y=1.05)
         st.pyplot(fig2)
-``
