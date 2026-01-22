@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from datetime import date
 
-st.title("AFRR Data Visualizer")
+st.title("AFRR Data Visualizer (Optimus-calibrated)")
 
 # === Delivery date selector ===
 selected_date = st.date_input(
@@ -34,14 +34,25 @@ except Exception as e:
     st.error(f"Error fetching data: {e}")
     st.stop()
 
+# ------- FILTER BASED ON STATUS (Optimus logic) ---------
+END_STATES = {
+    "NEEDS REVISION BY TR", "NEEDS REVISION BY GS", 
+    "CANCELLED", "NOT EXECUTED", "EXECUTED"
+}
+# Replace 'or_status' with your actual status column if different
+status_col = 'or_status'
+if status_col in df.columns:
+    df = df[~df[status_col].isin(END_STATES)].copy()
+
+# If present, apply further filtering or transformation using Optimus logic below.
+# For example: scheduled period/ROP checks would go here if these are available as columns.
+
 # Period definitions
 periods = ['0 - 4', '4 - 8', '8 - 12', '12 - 16', '16 - 20', '20 - 24']
 directions = ['afrrofferedvolumeupmw', 'afrrofferedvolumedownmw']
 
-# ----------- Auction results summary block ------------
 st.markdown("### Auction Results")
 
-# --- All-CCTU (0-24) selected bids
 df_0_24 = df[df['capacitybiddeliveryperiod'].astype(str) == '0 - 24'].copy()
 sel_mask_cctu = df_0_24.get('selectedbyoptimizer', pd.Series("false")).astype(str).str.lower() == "true"
 selected_cctu = df_0_24[sel_mask_cctu]
@@ -67,7 +78,6 @@ if not selected_cctu.empty:
 else:
     st.info("No bids were selected for All-CCTU (period 0 to 24).")
 
-# --- Selected period statistics for other periods
 results_rows = []
 for per in periods:
     for direction in ['up', 'down']:
@@ -77,9 +87,8 @@ for per in periods:
         subdf = df[sel_mask].copy()
         subdf[field] = pd.to_numeric(subdf[field], errors='coerce')
         subdf[price] = pd.to_numeric(subdf[price], errors='coerce')
-        # Submitted
+        # (Optionally apply further Optimus logic here: e.g., process only if required Scheduled/ROP fields present.)
         total_submitted_vol = subdf[field].sum()
-        # Selected
         sel_opt_mask = subdf.get('selectedbyoptimizer', pd.Series("false")).astype(str).str.lower() == "true"
         sel_bids = subdf[sel_opt_mask]
         total_selected_vol = sel_bids[field].sum()
@@ -95,6 +104,7 @@ for per in periods:
             'Avg selected price (€/MWh)': avg_price,
             'Marginal price (€/MWh)': marginal_price
         })
+
 if results_rows:
     st.dataframe(
         pd.DataFrame(results_rows),
@@ -105,8 +115,6 @@ else:
 
 # ==== All-CCTU up visualizer ====
 st.markdown("## All-CCTU up visualizer")
-
-# --- Offered down volume selectbox, after the title
 unique_down_volumes = df_0_24['afrrofferedvolumedownmw'].dropna().unique()
 unique_down_volumes = np.sort(unique_down_volumes.astype(float))
 if len(unique_down_volumes) == 0:
@@ -115,13 +123,11 @@ if len(unique_down_volumes) == 0:
 
 down_volume = st.selectbox("Select a value for offered down volume (MW):", unique_down_volumes, index=0)
 
-# --- Y-axis max below this element
 max_price_main = st.number_input(
     "Set maximum for price Y-axis for all-CCTU chart (0 for auto):",
     min_value=0.0, value=0.0, step=1.0, format="%.2f", help="Set Y-axis max for main graph. Zero for auto."
 )
 
-# -------- Graph 1: All-CCTU up visualizer ---------
 main_mask = (df_0_24['afrrofferedvolumedownmw'].astype(float) == down_volume)
 plot_df = df_0_24[main_mask].copy()
 
@@ -135,7 +141,6 @@ else:
     y_sel = y_main[optimizer_mask]
     x_not_sel = x_main[~optimizer_mask]
     y_not_sel = y_main[~optimizer_mask]
-
     fig1, ax1 = plt.subplots(figsize=(8, 5))
     ax1.scatter(x_not_sel, y_not_sel, color='yellow', edgecolor='black', label='Not selected by Optimizer', s=50)
     ax1.scatter(x_sel, y_sel, color='red', edgecolor='black', label='Selected by Optimizer', s=50)
