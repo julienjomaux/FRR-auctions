@@ -421,7 +421,7 @@ if st.session_state['ymax_down_input'] is None:
     st.session_state['ymax_down_input'] = dynamic_ymax_down
 
 # ----------------------------- Metrics (aFRR) -----------------------------
-st.subheader("Auction Cost Summary")
+st.subheader("aFRR Auction Cost Summary")
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Total Auction Cost (€)", f"{total_cost:,.0f}")
 c2.metric("All-CCTU (0–24) Cost (€)", f"{comp_allcctu:,.0f}")
@@ -710,8 +710,7 @@ with col_main:
 # ===================== mFRR additions START (UI sections) =====================
 
 st.markdown("---")
-st.header("mFRR Auction Results (ods055)")
-st.caption("No All-CCTU for mFRR — results shown per 4-hour delivery period.")
+st.header("mFRR Auction Results")
 
 # Fetch & process mFRR for the same date
 df_mfrr_raw = fetch_mfrr(str(date))
@@ -726,7 +725,7 @@ else:
     c_m1.metric("mFRR Total Auction Cost (€)", f"{mfrr_cost_total:,.0f}")
 
     # ---- Results Table ----
-    st.markdown("### mFRR Results by Period & Direction")
+    st.markdown("### mFRR Results")
     st.markdown(
         "Volume-weighted average and marginal prices, and volumes per **4-hour period**. "
         "Prices are in **EUR/MW**, costs computed as `4 × Avg Price × Awarded Volume`."
@@ -739,10 +738,6 @@ else:
 
         # ---- Bar Charts (UP only) ----
         st.markdown("### mFRR Bar Charts — UP Direction Only")
-        st.write(
-            "Per-period **UP** metrics: Volume-weighted Average Price, Marginal Price, and Total Awarded Volume. "
-            "Y-axes start at 0 with a small headroom."
-        )
 
         # Subset UP and order by the canonical 4h periods
         mfrr_up = mfrr_summary[mfrr_summary['Direction'] == 'UP'].copy()
@@ -871,4 +866,5 @@ try:
     )
 except Exception:
     pass
+
 
