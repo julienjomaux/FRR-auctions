@@ -12,33 +12,67 @@ date = st.date_input("Select delivery date:", help="Pick the date you want to an
 def fetch(dataset, d):
     url = "https://opendata.elia.be/api/records/1.0/search/"
     params = {"dataset": dataset, "rows": 10000, "refine.deliverydate": d}
-    r = requests.get(url, params=params)
-    return pd.DataFrame([rec['fields'] for rec in r.json().get("records", [])])
+    r = requests.get(url, params=params, timeout=30)
+    r.raise_for_status()
+    js = r.json()
+    return pd.DataFrame([rec['fields'] for rec in js.get("records", [])])
 
 def to_float(series, default=0.0):
     """Safe numeric conversion to float with fallback default."""
     return pd.to_numeric(series, errors="coerce").fillna(default).astype(float)
 
+def ensure_cols(df, cols):
+    for c in cols:
+        if c not in df.columns:
+            df[c] = 0
+    return df
+
 if date:
+    # Load data for the selected date
     df = fetch("ods125", str(date))
     if df.empty:
         st.warning("No data found for that date.")
         st.stop()
 
-    # Ensure expected columns exist (fallback to zero if absent)
-    for col in [
+    # Ensure expected columns
+    df = ensure_cols(df, [
         'afrrofferedvolumeupmw', 'afrrofferedvolumedownmw',
         'afrrawardedvolumeupmw', 'afrrawardedvolumedownmw',
         'priceupmwh', 'pricedownmwh', 'selectedbyoptimizer',
         'capacitybiddeliveryperiod', 'index'
-    ]:
-        if col not in df.columns:
-            df[col] = 0
+    ])
+
+    # ---------- Compute dynamic defaults for y-max of Merit Order charts (based on selected date) ----------
+    periods = ['0 - 4', '4 - 8', '8 - 12', '12 - 16', '16 - 20', '20 - 24']
+
+    # Numeric conversions for price columns (whole df)
+    df['priceupmwh'] = to_float(df['priceupmwh'])
+    df['pricedownmwh'] = to_float(df['pricedownmwh'])
+    df['selectedbyoptimizer'] = df['selectedbyoptimizer'].astype(str).str.lower() == "true"
+
+    # Consider only the 6 4-hour periods for dynamic y-max
+    df_4h = df[df['capacitybiddeliveryperiod'].astype(str).isin(periods)]
+    max_up_price = float(df_4h['priceupmwh'].max()) if not df_4h.empty else 0.0
+    max_down_price = float(df_4h['pricedownmwh'].max()) if not df_4h.empty else 0.0
+
+    # Initial y-max = rounded(max * 1.1), with safe lower bound
+    def initial_ymax(v):
+        if v <= 0:
+            return 500  # sensible default
+        return int(round(v * 1.1))
+
+    dynamic_ymax_up = initial_ymax(max_up_price)
+    dynamic_ymax_down = initial_ymax(max_down_price)
+
+    # Reset merit order y-max defaults when date changes (so charts update with new date)
+    if 'last_date' not in st.session_state or st.session_state['last_date'] != str(date):
+        st.session_state['ymax_up_input'] = dynamic_ymax_up
+        st.session_state['ymax_down_input'] = dynamic_ymax_down
+        st.session_state['last_date'] = str(date)
 
     # ---------------- Total Cost Calculation (immediately after date) ----------------
     # All-CCTU 0-24 selected bids component (sum[(Pdown*Vdown_awarded + Pup*Vup_awarded)*24])
     allcctu = df[df['capacitybiddeliveryperiod'].astype(str) == '0 - 24'].copy()
-    allcctu['selectedbyoptimizer'] = allcctu['selectedbyoptimizer'].astype(str).str.lower() == "true"
     allcctu_sel = allcctu[allcctu['selectedbyoptimizer']].copy()
 
     v_up_24 = to_float(allcctu_sel['afrrawardedvolumeupmw'])
@@ -48,8 +82,7 @@ if date:
 
     comp_allcctu = ((p_dn_24 * v_dn_24) + (p_up_24 * v_up_24)).sum() * 24.0  # €/MWh * MW * h = €
 
-    # Build summary by period/direction to reuse for both the table and cost components
-    periods = ['0 - 4', '4 - 8', '8 - 12', '12 - 16', '16 - 20', '20 - 24']
+    # Build summary by period/direction (used for table, bars, costs)
     rows = []
     for p in periods:
         dper = df[df['capacitybiddeliveryperiod'].astype(str) == p].copy()
@@ -57,32 +90,31 @@ if date:
             ("UP", "afrrofferedvolumeupmw", "afrrawardedvolumeupmw", "priceupmwh"),
             ("DOWN", "afrrofferedvolumedownmw", "afrrawardedvolumedownmw", "pricedownmwh"),
         ]:
-            # Convert to numeric safely
             dper[vol_col] = to_float(dper[vol_col])
             dper[awd_col] = to_float(dper[awd_col])
             dper[prc_col] = to_float(dper[prc_col])
-            dper['selectedbyoptimizer'] = dper['selectedbyoptimizer'].astype(str).str.lower() == "true"
 
             tot_vol_sub = dper[vol_col].sum()
             selected = dper[dper['selectedbyoptimizer']]
 
             tot_awarded = selected[awd_col].sum()
             if tot_awarded > 0:
-                # Weighted average by awarded volume
                 avg_price = (selected[prc_col] * selected[awd_col]).sum() / tot_awarded
             else:
                 avg_price = 0.0
             marginal_price = selected[prc_col].max() if not selected.empty else 0.0
 
-            rows.append([p, dir_, round(tot_awarded, 2), round(avg_price, 2), round(marginal_price, 2), round(tot_vol_sub, 2)])
+            rows.append([
+                p, dir_, round(tot_awarded, 2), round(avg_price, 2),
+                round(marginal_price, 2), round(tot_vol_sub, 2)
+            ])
 
     summary = pd.DataFrame(rows, columns=[
         "Period", "Direction", "Total Awarded Volume (MW)", "Average Price (€/MWh)",
         "Marginal Price (€/MWh)", "Total Submitted Volume (MW)"
     ])
 
-    # Cost components for UP and DOWN directions across periods:
-    # component = sum_over_periods( avg_price_period * total_awarded_volume_period * 4h )
+    # Costs for UP/DOWN directions across periods: sum(avg_price * awarded_volume * 4h)
     def comp_direction(direction: str) -> float:
         sub = summary[summary["Direction"] == direction]
         return float((sub["Average Price (€/MWh)"] * sub["Total Awarded Volume (MW)"] * 4.0).sum())
@@ -104,20 +136,17 @@ if date:
     with col_main:
 
         # ---------------- All-CCTU Table ----------------
-        sel = allcctu[allcctu['selectedbyoptimizer']]
         st.markdown("### All-CCTU (0-24): Selected Bids")
         st.markdown("Selected aFRR bids for the All-CCTU (0-24h) period.")
-        if not sel.empty:
+        if not allcctu_sel.empty:
             # Prepare table with both up/down awarded volumes, rounded to 2 decimals
-            t = sel[[
+            t = allcctu_sel[[
                 'index', 'pricedownmwh', 'priceupmwh',
                 'afrrofferedvolumedownmw', 'afrrawardedvolumedownmw', 'afrrawardedvolumeupmw'
             ]].copy()
-
             # Convert numeric columns and round to 2 decimals
             for c in ['pricedownmwh', 'priceupmwh', 'afrrofferedvolumedownmw', 'afrrawardedvolumedownmw', 'afrrawardedvolumeupmw']:
                 t[c] = to_float(t[c]).round(2)
-
             t.columns = [
                 "Index", "Price Down (€/MWh)", "Price Up (€/MWh)",
                 "Offered Down (MW)", "Awarded Down (MW)", "Awarded Up (MW)"
@@ -147,7 +176,8 @@ if date:
         selected_metric = st.selectbox(
             "Select metric for bar charts:",
             list(metric_options.keys()),
-            index=0
+            index=0,
+            key=f"metric_select_{date}"  # Ensure update when date changes
         )
         metric_col = metric_options[selected_metric]
 
@@ -161,7 +191,7 @@ if date:
         # Compute a common y max across both charts so max is included, with a small headroom
         combined_max = float(max(y_up.max(), y_dn.max()))
         if combined_max <= 0:
-            y_top = 1.0  # minimal visible top for empty/zero data
+            y_top = 1.0
         else:
             y_top = combined_max * 1.05  # small margin to avoid clipping the tallest bar
 
@@ -202,7 +232,9 @@ if date:
             st.info("No data to select for 'Offered Volume Down'.")
         else:
             selected_value = st.selectbox(
-                "Select the 'Offered Volume Down' for filtering:", vals, index=0)
+                "Select the 'Offered Volume Down' for filtering:",
+                vals, index=0, key=f"ovd_select_{date}"  # key includes date to reset on change
+            )
             mask0 = (to_float(allcctu['afrrofferedvolumedownmw']) == float(selected_value))
             p0 = allcctu[mask0]
             if not p0.empty:
@@ -234,48 +266,49 @@ if date:
             "These charts show the cumulative upward offered volumes sorted by price for each 4-hour delivery period. "
             "Selected bids are highlighted. You can set the maximum Y (price) value for all plots below."
         )
-        default_ymax_up = 500  # adjust as needed
-        ymax_up = st.number_input(
+
+        # Number input with dynamic initial value for this date
+        ymax_up_input = st.number_input(
             "Set y-max (€/MWh) for AFRR Up Merit Order plots:",
-            min_value=10, max_value=2000, value=default_ymax_up, step=10
+            min_value=10, max_value=2000, value=st.session_state['ymax_up_input'], step=10, key=f'ymax_up_{date}'
         )
+        # Keep session state synced (so if user changes date again, we can re-init properly)
+        st.session_state['ymax_up_input'] = ymax_up_input
 
         # Prepare up merit order plots for all periods
         xmax = 0.0
-        data_up = []
+        data_up_plot = []
         for p in periods:
             sub = df[df['capacitybiddeliveryperiod'].astype(str) == p].copy()
-            # Valid rows have numeric offered volume and price
             sub['afrrofferedvolumeupmw'] = to_float(sub['afrrofferedvolumeupmw'])
             sub['priceupmwh'] = to_float(sub['priceupmwh'])
             valid = sub['afrrofferedvolumeupmw'].notnull() & sub['priceupmwh'].notnull()
             sub = sub[valid]
             if sub.empty:
-                data_up.append(([], [], [], [], [], [], p))
+                data_up_plot.append(([], [], [], [], [], [], p))
                 continue
-            sub['selectedbyoptimizer'] = sub['selectedbyoptimizer'].astype(str).str.lower() == "true"
             sub = sub.sort_values(by='priceupmwh')
             cum = sub['afrrofferedvolumeupmw'].cumsum()
             prc = sub['priceupmwh']
             sel_mask = sub['selectedbyoptimizer']
-            data_up.append((cum, prc, cum[sel_mask], prc[sel_mask], cum[~sel_mask], prc[~sel_mask], p))
+            data_up_plot.append((cum, prc, cum[sel_mask], prc[sel_mask], cum[~sel_mask], prc[~sel_mask], p))
             if not cum.empty:
                 xmax = max(xmax, float(cum.max()))
 
         fig1, axs1 = plt.subplots(3, 2, figsize=(9, 9))
         axs1 = axs1.flatten()
-        for i, (cum, prc, cs, ps, cnc, pnc, p) in enumerate(data_up):
+        for i, (cum, prc, cs, ps, cnc, pnc, period_lbl) in enumerate(data_up_plot):
             ax = axs1[i]
             if len(cum): ax.step(cum, prc, where='post', color='gray', linewidth=1)
             if len(cnc): ax.scatter(cnc, pnc, color='yellow', edgecolor='black', s=20, label='Not selected')
             if len(cs): ax.scatter(cs, ps, color='red', edgecolor='black', s=20, label='Selected')
-            ax.set_title(f"Period {p}", fontsize=10)
+            ax.set_title(f"Period {period_lbl}", fontsize=10)
             # Remove x-axis title; keep y label
             ax.set_ylabel("Price up (€/MWh)")
             ax.set_xlabel("")
             ax.set(
                 xlim=(0, max(1.0, xmax)),
-                ylim=(0, ymax_up)  # y starts at 0; top controlled by user
+                ylim=(0, ymax_up_input)  # y starts at 0; default was dynamic based on date
             )
             ax.grid(True)
             h, l = ax.get_legend_handles_labels()
@@ -294,48 +327,48 @@ if date:
             "These charts show the cumulative downward offered volumes sorted by price for each 4-hour delivery period. "
             "Selected bids are highlighted. You can set the maximum Y (price) value for all plots below."
         )
-        default_ymax_down = 500  # adjust as needed
-        ymax_down = st.number_input(
+
+        # Number input with dynamic initial value for this date
+        ymax_down_input = st.number_input(
             "Set y-max (€/MWh) for AFRR Down Merit Order plots:",
-            min_value=10, max_value=2000, value=default_ymax_down, step=10, key='ymax_down'
+            min_value=10, max_value=2000, value=st.session_state['ymax_down_input'], step=10, key=f'ymax_down_{date}'
         )
+        st.session_state['ymax_down_input'] = ymax_down_input
 
         # Prepare down merit order plots for all periods
         xmaxd = 0.0
-        data_down = []
+        data_down_plot = []
         for p in periods:
             sub = df[df['capacitybiddeliveryperiod'].astype(str) == p].copy()
-            # Valid rows have numeric offered volume and price
             sub['afrrofferedvolumedownmw'] = to_float(sub['afrrofferedvolumedownmw'])
             sub['pricedownmwh'] = to_float(sub['pricedownmwh'])
             valid = sub['afrrofferedvolumedownmw'].notnull() & sub['pricedownmwh'].notnull()
             sub = sub[valid]
             if sub.empty:
-                data_down.append(([], [], [], [], [], [], p))
+                data_down_plot.append(([], [], [], [], [], [], p))
                 continue
-            sub['selectedbyoptimizer'] = sub['selectedbyoptimizer'].astype(str).str.lower() == "true"
             sub = sub.sort_values(by='pricedownmwh')
             cum = sub['afrrofferedvolumedownmw'].cumsum()
             prc = sub['pricedownmwh']
             sel_mask = sub['selectedbyoptimizer']
-            data_down.append((cum, prc, cum[sel_mask], prc[sel_mask], cum[~sel_mask], prc[~sel_mask], p))
+            data_down_plot.append((cum, prc, cum[sel_mask], prc[sel_mask], cum[~sel_mask], prc[~sel_mask], p))
             if not cum.empty:
                 xmaxd = max(xmaxd, float(cum.max()))
 
         fig2, axs2 = plt.subplots(3, 2, figsize=(9, 9))
         axs2 = axs2.flatten()
-        for i, (cum, prc, cs, ps, cnc, pnc, p) in enumerate(data_down):
+        for i, (cum, prc, cs, ps, cnc, pnc, period_lbl) in enumerate(data_down_plot):
             ax = axs2[i]
             if len(cum): ax.step(cum, prc, where='post', color='gray', linewidth=1)
             if len(cnc): ax.scatter(cnc, pnc, color='yellow', edgecolor='black', s=20, label='Not selected')
             if len(cs): ax.scatter(cs, ps, color='red', edgecolor='black', s=20, label='Selected')
-            ax.set_title(f"Period {p}", fontsize=10)
+            ax.set_title(f"Period {period_lbl}", fontsize=10)
             # Remove x-axis title; keep y label
             ax.set_ylabel("Price down (€/MWh)")
             ax.set_xlabel("")
             ax.set(
                 xlim=(0, max(1.0, xmaxd)),
-                ylim=(0, ymax_down)  # y starts at 0; top controlled by user
+                ylim=(0, ymax_down_input)  # y starts at 0; default was dynamic based on date
             )
             ax.grid(True)
             h, l = ax.get_legend_handles_labels()
