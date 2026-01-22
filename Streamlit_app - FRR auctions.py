@@ -3,7 +3,6 @@ import pandas as pd
 import requests
 import matplotlib.pyplot as plt
 
-st.set_page_config(page_title="AFRR Bids Overview")
 st.title("AFRR Auction Results Explorer")
 date = st.date_input("Select delivery date:", help="Pick the date you want to analyze.")
 
@@ -118,4 +117,5 @@ if date:
     plt.tight_layout()
     plt.suptitle("AFRR Up Merit Order by Delivery Period", fontsize=14, y=1.05)
     st.pyplot(fig)
+
 
