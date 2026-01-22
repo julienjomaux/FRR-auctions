@@ -15,7 +15,7 @@ st.title("AFRR Auction Results Explorer")
 
 # ----------------------------- Constants ------------------------------
 PERIODS_4H = ['0 - 4', '4 - 8', '8 - 12', '12 - 16', '16 - 20', '20 - 24']  # six 4h periods
-DATASET = "ods125"
+DATASET = "ods125"  # aFRR dataset
 BASE_URL = "https://opendata.elia.be/api/records/1.0/search/"
 
 # ----------------------------- Helpers -------------------------------
@@ -65,10 +65,9 @@ def normalize_period(val: object) -> str:
 # ----------------------------- Data Fetch (Pagination + Retries) -----------------------------
 
 @st.cache_data(show_spinner=True, ttl=15 * 60)
-def fetch(dataset: str, d: str, rows_per_page: int = 10000, max_pages: int = 20,
-          retries: int = 3, backoff: float = 0.7) -> pd.DataFrame:
+def fetch(dataset: str, d: str, rows_per_page: int = 10000, max_pages: int = 20, retries: int = 3, backoff: float = 0.7) -> pd.DataFrame:
     """
-    Fetches all records for a given delivery date using pagination and simple retries.
+    Fetches all aFRR records (ods125) for a given delivery date using pagination and simple retries.
     """
     all_records = []
     start = 0
@@ -107,14 +106,14 @@ def fetch(dataset: str, d: str, rows_per_page: int = 10000, max_pages: int = 20,
 
     return pd.DataFrame(all_records)
 
-# ----------------------------- Computations (Vectorized) -----------------------------
+# ----------------------------- aFRR Computations (Vectorized) -----------------------------
 
 @st.cache_data(show_spinner=False)
 def process_data(df_raw: pd.DataFrame):
     """
-    Cleans raw DataFrame, ensures required columns, types, and returns:
-    - df: cleaned with 'period_str' (string) and 'period_4h' (categorical)  # <<<
-    - allcctu: all rows where period_str == '0 - 24'                        # <<<
+    Cleans raw aFRR DataFrame, ensures required columns, types, and returns:
+    - df: cleaned with 'period_str' (string) and 'period_4h' (categorical)
+    - allcctu: all rows where period_str == '0 - 24'
     - allcctu_sel: same but selected
     - dynamic_ymax_up, dynamic_ymax_down
     """
@@ -136,7 +135,7 @@ def process_data(df_raw: pd.DataFrame):
     # selected flag robustly to boolean
     df['selectedbyoptimizer'] = coerce_selected(df['selectedbyoptimizer'])
 
-    # --- Period handling: keep a clean string and a separate 4h categorical  --- # <<<
+    # --- Period handling: keep a clean string and a separate 4h categorical  ---
     df['period_str'] = df['capacitybiddeliveryperiod'].map(normalize_period)
 
     # Only 4h periods get a categorical; others (e.g., '0 - 24') become <NA> in period_4h
@@ -154,18 +153,19 @@ def process_data(df_raw: pd.DataFrame):
     dynamic_ymax_down = initial_ymax(max_down_price)
 
     # All-CCTU 0-24 (use normalized string)
-    allcctu = df[df['period_str'] == '0 - 24'].copy()       # <<<
+    allcctu = df[df['period_str'] == '0 - 24'].copy()
     allcctu_sel = allcctu[allcctu['selectedbyoptimizer']].copy()
 
     return df, allcctu, allcctu_sel, dynamic_ymax_up, dynamic_ymax_down
 
+
 @st.cache_data(show_spinner=False)
 def build_summary_and_costs(df: pd.DataFrame, allcctu_sel: pd.DataFrame):
     """
-    Builds the summary table and cost breakdown.
+    Builds the aFRR summary table and cost breakdown.
     Returns summary_df, cost_up, cost_down, cost_allcctu, total_cost
     """
-    # Summary by period/direction for the 6x 4-hour periods (use period_4h)  # <<<
+    # Summary by period/direction for the 6x 4-hour periods (use period_4h)
     d4 = df[df['period_4h'].notna()].copy()
 
     # Total submitted per period/direction (using offered volumes)
@@ -220,7 +220,7 @@ def build_summary_and_costs(df: pd.DataFrame, allcctu_sel: pd.DataFrame):
     summary['Period'] = pd.Categorical(summary['Period'], categories=PERIODS_4H, ordered=True)
     summary = summary.sort_values(['Direction', 'Period'])
 
-    # Costs (4h periods use 4 hours)
+    # Costs
     def comp_direction(direction: str) -> float:
         sub = summary[summary["Direction"] == direction]
         return float((sub["Average Price (€/MWh)"] * sub["Total Awarded Volume (MW)"] * 4.0).sum())
@@ -228,7 +228,7 @@ def build_summary_and_costs(df: pd.DataFrame, allcctu_sel: pd.DataFrame):
     comp_up = comp_direction("UP")
     comp_down = comp_direction("DOWN")
 
-    # All-CCTU cost component (24 hours)
+    # All-CCTU cost component
     v_up_24 = to_float(allcctu_sel['afrrawardedvolumeupmw'])
     v_dn_24 = to_float(allcctu_sel['afrrawardedvolumedownmw'])
     p_up_24 = to_float(allcctu_sel['priceupmwh'])
@@ -237,6 +237,140 @@ def build_summary_and_costs(df: pd.DataFrame, allcctu_sel: pd.DataFrame):
 
     total_cost = comp_allcctu + comp_up + comp_down
     return summary, comp_up, comp_down, comp_allcctu, total_cost
+
+
+# ===================== mFRR additions START (functions) =====================
+
+@st.cache_data(show_spinner=True, ttl=15 * 60)
+def fetch_mfrr(d: str, rows_per_page: int = 10000, max_pages: int = 20, retries: int = 3, backoff: float = 0.7) -> pd.DataFrame:
+    """
+    Fetches all mFRR records (ods055) for a given delivery date using pagination and simple retries.
+    """
+    MF_BASE_URL = "https://opendata.elia.be/api/records/1.0/search/"
+    all_records = []
+    start = 0
+    headers = {"User-Agent": "AFRR-Explorer/1.0"}
+
+    for page in range(max_pages):
+        params = {
+            "dataset": "ods055",
+            "rows": rows_per_page,
+            "start": start,
+            "refine.deliverydate": d
+        }
+
+        last_exc = None
+        for attempt in range(retries):
+            try:
+                r = requests.get(MF_BASE_URL, params=params, timeout=30, headers=headers)
+                r.raise_for_status()
+                js = r.json()
+                recs = js.get("records", [])
+                all_records.extend([rec.get('fields', {}) for rec in recs])
+
+                if len(recs) < rows_per_page:
+                    return pd.DataFrame(all_records)
+
+                start += rows_per_page
+                break
+            except Exception as e:
+                last_exc = e
+                time.sleep(backoff * (2 ** attempt))
+        else:
+            st.warning(f"[mFRR] Partial data fetched. Error during fetch at start={start}: {last_exc}")
+            break
+
+    return pd.DataFrame(all_records)
+
+
+@st.cache_data(show_spinner=False)
+def process_mfrr(df_raw: pd.DataFrame):
+    """
+    Cleans mFRR (ods055) raw DataFrame and computes:
+    - mfrr_summary: tidy table per 4h period & direction (UP/DOWN)
+    - mfrr_cost_total: total auction cost (both directions), 4h * avg_price * awarded
+    - mfrr_cost_up, mfrr_cost_down: directional breakdown
+    """
+    # Ensure expected columns exist
+    expected_columns = [
+        'index', 'deliverydate', 'capacitybiddeliveryperiod', 'regulationdirection',
+        'mfrrstdcapbidprice', 'mfrrstdawardedvolume', 'mfrrofferedvolume'
+    ]
+    df = df_raw.copy()
+    for c in expected_columns:
+        if c not in df.columns:
+            df[c] = pd.NA
+
+    # Normalize / coerce types
+    df['regulationdirection'] = df['regulationdirection'].astype(str).str.strip().str.upper()
+    df['period_str'] = df['capacitybiddeliveryperiod'].map(normalize_period)
+    df['period_4h'] = pd.Categorical(
+        df['period_str'].where(df['period_str'].isin(PERIODS_4H), pd.NA),
+        categories=PERIODS_4H, ordered=True
+    )
+
+    df['mfrrstdcapbidprice'] = to_float(df['mfrrstdcapbidprice'])
+    df['mfrrstdawardedvolume'] = to_float(df['mfrrstdawardedvolume'])
+    df['mfrrofferedvolume'] = to_float(df['mfrrofferedvolume'])
+
+    # Keep only the standard 4h periods; no All-CCTU for mFRR
+    d4 = df[df['period_4h'].notna()].copy()
+    if d4.empty:
+        # Return empty structures gracefully
+        mfrr_summary = pd.DataFrame(columns=[
+            "Period", "Direction",
+            "Total Awarded Volume (MW)",
+            "Average Price (EUR/MW)",
+            "Marginal Price (EUR/MW)",
+            "Total Offered Volume (MW)"
+        ])
+        return mfrr_summary, 0.0, 0.0, 0.0
+
+    # Compute metrics per period & direction
+    grp = d4.groupby(['period_4h', 'regulationdirection'], observed=True)
+
+    tot_awarded = grp['mfrrstdawardedvolume'].sum().rename('tot_awarded')
+    tot_offered = grp['mfrrofferedvolume'].sum().rename('tot_offered')
+    w_price_sum = grp.apply(
+        lambda g: (g['mfrrstdcapbidprice'] * g['mfrrstdawardedvolume']).sum()
+    ).rename('w_price_sum')
+
+    # Volume-weighted average price
+    avg_price = (w_price_sum / tot_awarded.replace({0.0: pd.NA})).fillna(0.0).rename('avg_price')
+
+    # Marginal = max price among bids with awarded > 0
+    marginal = grp.apply(
+        lambda g: g.loc[g['mfrrstdawardedvolume'] > 0, 'mfrrstdcapbidprice'].max()
+        if (g['mfrrstdawardedvolume'] > 0).any() else 0.0
+    ).rename('marginal')
+
+    # Assemble tidy table
+    out = pd.concat([tot_awarded, tot_offered, avg_price, marginal], axis=1).reset_index()
+    out.rename(columns={
+        'period_4h': 'Period',
+        'regulationdirection': 'Direction',
+        'tot_awarded': 'Total Awarded Volume (MW)',
+        'tot_offered': 'Total Offered Volume (MW)',
+        'avg_price': 'Average Price (EUR/MW)',
+        'marginal': 'Marginal Price (EUR/MW)'
+    }, inplace=True)
+
+    # Sorting
+    out['Period'] = pd.Categorical(out['Period'].astype(str), categories=PERIODS_4H, ordered=True)
+    out['Direction'] = pd.Categorical(out['Direction'], categories=['UP', 'DOWN'], ordered=True)
+    out = out.sort_values(['Direction', 'Period']).reset_index(drop=True)
+
+    # Costs (4h windows)
+    out['_cost'] = 4.0 * out['Average Price (EUR/MW)'] * out['Total Awarded Volume (MW)']
+    mfrr_cost_total = float(out['_cost'].sum())
+    mfrr_cost_up = float(out.loc[out['Direction'] == 'UP', '_cost'].sum())
+    mfrr_cost_down = float(out.loc[out['Direction'] == 'DOWN', '_cost'].sum())
+    out.drop(columns=['_cost'], inplace=True)
+
+    return out, mfrr_cost_total, mfrr_cost_up, mfrr_cost_down
+
+# ===================== mFRR additions END (functions) =====================
+
 
 # ----------------------------- Sidebar Controls -----------------------------
 
@@ -265,12 +399,13 @@ if 'last_date' not in st.session_state or st.session_state['last_date'] != str(d
     st.session_state['last_date'] = str(date)
     st.session_state['ymax_up_input'] = None
     st.session_state['ymax_down_input'] = None
+    # No need to reset metric select—its key is date-scoped now
 
 if not date:
     st.info("Please select a delivery date from the sidebar to begin.")
     st.stop()
 
-# ----------------------------- Data Load -----------------------------
+# ----------------------------- Data Load (aFRR) -----------------------------
 df_raw = fetch(DATASET, str(date))
 if df_raw.empty:
     st.warning("No data found for that date.")
@@ -285,7 +420,7 @@ if st.session_state['ymax_up_input'] is None:
 if st.session_state['ymax_down_input'] is None:
     st.session_state['ymax_down_input'] = dynamic_ymax_down
 
-# ----------------------------- Metrics -----------------------------
+# ----------------------------- Metrics (aFRR) -----------------------------
 st.subheader("Auction Cost Summary")
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Total Auction Cost (€)", f"{total_cost:,.0f}")
@@ -296,7 +431,7 @@ c4.metric("DOWN (periods) Cost (€)", f"{comp_down:,.0f}")
 # ----------------------------- Centered Layout -----------------------------
 col_left, col_main, col_right = st.columns([0.08, 0.84, 0.08])
 with col_main:
-    # ---------------- All-CCTU Table ----------------
+    # ---------------- All-CCTU Table (aFRR) ----------------
     st.markdown("### All-CCTU (0–24): Selected Bids")
     st.markdown("Selected aFRR bids for the All-CCTU (0–24h) period.")
     if not allcctu_sel.empty:
@@ -314,12 +449,12 @@ with col_main:
     else:
         st.info("No All-CCTU selected bids for this date.")
 
-    # ---------------- Summary Table ----------------
+    # ---------------- Summary Table (aFRR) ----------------
     st.markdown("### Period Results Summary")
     st.markdown("This summary table shows total volumes and prices by direction and period.")
     st.dataframe(summary, use_container_width=True, height=320)
 
-    # ---------------- Dual Bar Charts (UP vs DOWN) ----------------
+    # ---------------- Dual Bar Charts (UP vs DOWN) (aFRR) ----------------
     st.markdown("### Bar Charts by Period (UP vs DOWN)")
     st.write(
         "Choose a metric to visualize for the 6 periods. Left chart shows **UP**, right shows **DOWN**. "
@@ -363,7 +498,7 @@ with col_main:
     st.pyplot(fig_bar)
     bar_png = _save_fig_png(fig_bar)
 
-    # ---------------- Scatter Plot (All-CCTU) ----------------
+    # ---------------- Scatter Plot (All-CCTU aFRR) ----------------
     st.markdown("---")
     st.markdown("## Scatter Plot: Offered UP vs Upward Price (All-CCTU 0–24)")
     st.write(
@@ -442,7 +577,7 @@ with col_main:
     data_up_plot = []
     marginals_up = {}
     for p in PERIODS_4H:
-        sub = df[df['period_4h'].astype(object) == p].copy()  # <<<
+        sub = df[df['period_4h'].astype(object) == p].copy()
         sub = sub[['afrrofferedvolumeupmw', 'priceupmwh', 'selectedbyoptimizer']].dropna()
         if sub.empty:
             data_up_plot.append(([], [], [], [], [], [], p))
@@ -516,7 +651,7 @@ with col_main:
     data_down_plot = []
     marginals_down = {}
     for p in PERIODS_4H:
-        sub = df[df['period_4h'].astype(object) == p].copy()  # <<<
+        sub = df[df['period_4h'].astype(object) == p].copy()
         sub = sub[['afrrofferedvolumedownmw', 'pricedownmwh', 'selectedbyoptimizer']].dropna()
         if sub.empty:
             data_down_plot.append(([], [], [], [], [], [], p))
@@ -571,6 +706,95 @@ with col_main:
     fig2.suptitle("aFRR Down Merit Order by Delivery Period", fontsize=14, y=1.02)
     st.pyplot(fig2)
     down_png = _save_fig_png(fig2)
+
+# ===================== mFRR additions START (UI sections) =====================
+
+st.markdown("---")
+st.header("mFRR Auction Results (ods055)")
+st.caption("No All-CCTU for mFRR — results shown per 4-hour delivery period.")
+
+# Fetch & process mFRR for the same date
+df_mfrr_raw = fetch_mfrr(str(date))
+if df_mfrr_raw.empty:
+    st.info("No mFRR data found for the selected date.")
+else:
+    mfrr_summary, mfrr_cost_total, mfrr_cost_up, mfrr_cost_down = process_mfrr(df_mfrr_raw)
+
+    # ---- Cost Metric ----
+    st.subheader("mFRR Auction Cost")
+    c_m1 = st.columns(1)[0]
+    c_m1.metric("mFRR Total Auction Cost (€)", f"{mfrr_cost_total:,.0f}")
+
+    # ---- Results Table ----
+    st.markdown("### mFRR Results by Period & Direction")
+    st.markdown(
+        "Volume-weighted average and marginal prices, and volumes per **4-hour period**. "
+        "Prices are in **EUR/MW**, costs computed as `4 × Avg Price × Awarded Volume`."
+    )
+
+    if mfrr_summary.empty:
+        st.info("No mFRR results to display for this date.")
+    else:
+        st.dataframe(mfrr_summary, use_container_width=True, height=360)
+
+        # ---- Bar Charts (UP only) ----
+        st.markdown("### mFRR Bar Charts — UP Direction Only")
+        st.write(
+            "Per-period **UP** metrics: Volume-weighted Average Price, Marginal Price, and Total Awarded Volume. "
+            "Y-axes start at 0 with a small headroom."
+        )
+
+        # Subset UP and order by the canonical 4h periods
+        mfrr_up = mfrr_summary[mfrr_summary['Direction'] == 'UP'].copy()
+        if mfrr_up.empty:
+            st.info("No UP-direction mFRR results available to plot.")
+        else:
+            mfrr_up = mfrr_up.set_index('Period').reindex(PERIODS_4H)
+
+            y_avg = to_float(mfrr_up['Average Price (EUR/MW)']).fillna(0.0)
+            y_mrg = to_float(mfrr_up['Marginal Price (EUR/MW)']).fillna(0.0)
+            y_vol = to_float(mfrr_up['Total Awarded Volume (MW)']).fillna(0.0)
+
+            def _top(y):
+                m = float(y.max()) if len(y) else 0.0
+                return (1.0 if m <= 0 else m * 1.05)
+
+            try:
+                fig_m, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(13, 4), constrained_layout=True)
+            except Exception:
+                fig_m, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(13, 4))
+                fig_m.subplots_adjust(top=0.86)
+
+            # Avg Price
+            ax1.bar(PERIODS_4H, y_avg, color="darkorange", edgecolor="black")
+            ax1.set_title('Avg Price (UP)')
+            ax1.set_ylabel('EUR/MW')
+            ax1.set_ylim(bottom=0, top=_top(y_avg))
+            ax1.tick_params(axis='x', rotation=45)
+            if opt_grid:
+                ax1.grid(True, axis='y', linestyle='--', alpha=0.5)
+
+            # Marginal Price
+            ax2.bar(PERIODS_4H, y_mrg, color="dodgerblue", edgecolor="black")
+            ax2.set_title('Marginal Price (UP)')
+            ax2.set_ylabel('EUR/MW')
+            ax2.set_ylim(bottom=0, top=_top(y_mrg))
+            ax2.tick_params(axis='x', rotation=45)
+            if opt_grid:
+                ax2.grid(True, axis='y', linestyle='--', alpha=0.5)
+
+            # Total Awarded Volume
+            ax3.bar(PERIODS_4H, y_vol, color="seagreen", edgecolor="black")
+            ax3.set_title('Total Awarded Volume (UP)')
+            ax3.set_ylabel('MW')
+            ax3.set_ylim(bottom=0, top=_top(y_vol))
+            ax3.tick_params(axis='x', rotation=45)
+            if opt_grid:
+                ax3.grid(True, axis='y', linestyle='--', alpha=0.5)
+
+            st.pyplot(fig_m)
+
+# ===================== mFRR additions END (UI sections) =====================
 
 # ----------------------------- Downloads -----------------------------
 st.markdown("---")
