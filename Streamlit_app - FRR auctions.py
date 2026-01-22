@@ -204,6 +204,8 @@ if date:
         ax_up.set_ylim(bottom=0, top=y_top)  # y starts at 0 and includes max
         ax_up.tick_params(axis='x', rotation=45)
         ax_up.set_xlabel("")  # remove x-axis title
+        # ---> Added grid
+        ax_up.grid(True, axis='y', linestyle='--', alpha=0.5)
 
         # DOWN bars
         ax_dn.bar(periods, y_dn, color="#F39C12", edgecolor="black")
@@ -211,6 +213,8 @@ if date:
         ax_dn.set_ylim(bottom=0, top=y_top)  # y starts at 0 and includes max
         ax_dn.tick_params(axis='x', rotation=45)
         ax_dn.set_xlabel("")  # remove x-axis title
+        # ---> Added grid
+        ax_dn.grid(True, axis='y', linestyle='--', alpha=0.5)
 
         plt.tight_layout()
         st.pyplot(fig_bar)
