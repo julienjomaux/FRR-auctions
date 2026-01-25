@@ -10,7 +10,7 @@ import requests
 import streamlit as st
 
 # ----------------------------- Page Config -----------------------------
-st.set_page_config(page_title="Belgian FRR capacity", layout="wide")
+st.set_page_config(page_title="Belgian FRR capacity", layout="wide", page_icon="GEM.webp")
 st.title("Belgian FRR capacity")
 
 # ----------------------------- Constants ------------------------------
@@ -866,5 +866,6 @@ try:
     )
 except Exception:
     pass
+
 
 
